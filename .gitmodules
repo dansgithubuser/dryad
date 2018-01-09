@@ -1,0 +1,3 @@
+[submodule "dyad"]
+	path = dyad
+	url = https://github.com/rxi/dyad
