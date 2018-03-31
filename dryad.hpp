@@ -82,8 +82,10 @@ class Client{
 			_queue.erase(_queue.begin(), _queue.begin()+4+size);
 			return true;
 		}
-		unsigned timesConnected(){ return _timesConnected; }
-		unsigned timesDisconnected(){ return _timesDisconnected; }
+		std::string ip() const { return _ip; }
+		int port() const { return _port; }
+		unsigned timesConnected() const { return _timesConnected; }
+		unsigned timesDisconnected() const { return _timesDisconnected; }
 	private:
 		void connect(){
 			_stream=dyad_newStream();
@@ -93,7 +95,7 @@ class Client{
 			dyad_addListener(_stream, DYAD_EVENT_DATA, onData, NULL);
 			dyad_connect(_stream, _ip.c_str(), _port);
 		}
-		void queue(uint8_t* data, unsigned size){ _queue.insert(_queue.end(), data, data+size); }
+		void queue(const uint8_t* data, unsigned size){ _queue.insert(_queue.end(), data, data+size); }
 		std::string _ip;
 		int _port;
 		dyad_Stream* _stream;
