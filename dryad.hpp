@@ -9,17 +9,40 @@
 
 namespace dryad{
 
-class Client;
-
-#ifndef DRYAD_DRY
-	Client* firstClient=nullptr;
-#endif
-
 static void onPanic(const char* message);
 static void onConnected(dyad_Event* e);
 static void onDestroyed(dyad_Event* e);
 static void onError(dyad_Event* e);
 static void onData(dyad_Event* e);
+
+#ifndef DRYAD_DRY
+	struct Boss{
+		Boss(){
+			dyad_atPanic(onPanic);
+			dyad_init();
+			dyad_setUpdateTimeout(0.0);
+			thread=std::thread([this](){
+				while(!quit){
+					mutex.lock();
+					dyad_update();
+					mutex.unlock();
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			});
+		}
+
+		~Boss(){
+			quit=true;
+			thread.join();
+		}
+
+		bool quit=false;
+		std::thread thread;
+		std::recursive_mutex mutex;
+	};
+
+	static Boss fBoss;
+#endif
 
 class Client{
 	friend void onConnected(dyad_Event*);
@@ -29,38 +52,11 @@ class Client{
 	public:
 		Client(std::string ip, int port):
 			_ip(ip), _port(port), _timesConnected(0), _timesDisconnected(0)
-		{
-			if(!firstClient){
-				dyad_atPanic(onPanic);
-				dyad_init();
-				dyad_setUpdateTimeout(0.0);
-			}
-			connect();
-			if(firstClient) return;
-			_quit=false;
-			_thread=std::thread([this](){
-				while(!_quit){
-					_mutex.lock();
-					dyad_update();
-					_mutex.unlock();
-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				}
-			});
-			firstClient=this;
-		}
-		~Client(){
-			if(this!=firstClient) return;
-			_quit=true;
-			_thread.join();
-			_mutex.lock();
-			dyad_update();
-			_mutex.unlock();
-			dyad_shutdown();
-		}
+		{ connect(); }
 		void write(const std::vector<uint8_t>& v){
-			_mutex.lock();
+			fBoss.mutex.lock();
 			dyad_write(_stream, v.data(), v.size());
-			_mutex.unlock();
+			fBoss.mutex.unlock();
 		}
 		void writeSizedString(const std::string& s){
 			if(!s.size()) return;
@@ -74,7 +70,7 @@ class Client{
 			write(bytes);
 		}
 		bool readSizedString(std::string& s){
-			std::lock_guard<std::recursive_mutex> lock(_mutex);
+			std::lock_guard<std::recursive_mutex> lock(fBoss.mutex);
 			if(_queue.size()<4) return false;
 			uint32_t size=
 				(_queue[0]<<0x00)|
@@ -94,24 +90,28 @@ class Client{
 		unsigned timesDisconnected() const { return _timesDisconnected; }
 	private:
 		void connect(){
-			_mutex.lock();
+			fBoss.mutex.lock();
 			_stream=dyad_newStream();
 			dyad_addListener(_stream, DYAD_EVENT_CONNECT, onConnected, this);
 			dyad_addListener(_stream, DYAD_EVENT_DESTROY, onDestroyed, this);
 			dyad_addListener(_stream, DYAD_EVENT_ERROR, onError, this);
 			dyad_addListener(_stream, DYAD_EVENT_DATA, onData, this);
 			dyad_connect(_stream, _ip.c_str(), _port);
-			_mutex.unlock();
+			fBoss.mutex.unlock();
 		}
 		void queue(const uint8_t* data, unsigned size){ _queue.insert(_queue.end(), data, data+size); }
+		unsigned backoff(){
+			_backoff*=2;
+			if(_backoff>500) _backoff=500;
+			return _backoff;
+		}
+		void backoffReset(){ _backoff=5; }
 		std::string _ip;
 		int _port;
 		dyad_Stream* _stream;
-		std::thread _thread;
-		bool _quit;
-		std::recursive_mutex _mutex;
 		std::vector<uint8_t> _queue;
 		unsigned _timesConnected, _timesDisconnected;
+		unsigned _backoff=5;
 };
 
 static void onPanic(const char* message){
@@ -125,10 +125,10 @@ static void onConnected(dyad_Event* e){
 }
 
 static void onDestroyed(dyad_Event* e){
-	std::this_thread::sleep_for(std::chrono::milliseconds(500));
 	auto client=(Client*)e->udata;
+	std::this_thread::sleep_for(std::chrono::milliseconds(client->backoff()));
 	if(client->_timesConnected>client->_timesDisconnected) ++client->_timesDisconnected;
-	if(!client->_quit) client->connect();
+	client->connect();
 }
 
 static void onError(dyad_Event* e){
@@ -138,6 +138,7 @@ static void onError(dyad_Event* e){
 
 static void onData(dyad_Event* e){
 	auto client=(Client*)e->udata;
+	client->backoffReset();
 	client->queue((uint8_t*)e->data, e->size);
 }
 
